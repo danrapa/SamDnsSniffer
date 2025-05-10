@@ -18,6 +18,21 @@
 #include <linux/filter.h>
 #include <time.h>
 
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// 1. shouldnt the threads join?                                                                        ////////////////////////////////////////////////
+// 2. why the conditions are ordered as they are? ipv6 -> eth (or return) -> ipv4?                      ////////////////////////////////////////////////
+// 3. is this code optimal in terms of the coding style (duplicated code?)                              ////////////////////////////////////////////////
+// 4. is this coe thread safe?                                                                          ////////////////////////////////////////////////
+// 5. is the enqueue/dequque are used correctly?                                                        ////////////////////////////////////////////////
+// 6. is it blocking?                                                                                   ////////////////////////////////////////////////
+// 7. does the epoll mechanism used correctly?                                                          ////////////////////////////////////////////////
+// 8. is it possible to add the ZERO COPY that is commented out (optional)                              ////////////////////////////////////////////////
+// 9. how is the performance of the code (runtime complexity and space complexity), can it be improved? ////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
 #define BUFFER_SIZE     65536
 #define DNS_PORT        53
 #define DNS_PORT_BE     (DNS_PORT << 8)
@@ -273,9 +288,6 @@ int parse_dns_name(const u_char *packet,
     return bytes_consumed;
 }
 
-// --------------------------------------------------------------------------
-//  PACKET HANDLER
-// --------------------------------------------------------------------------
 /**
  * @brief Parse one raw packet buffer, extract & print the DNS question name.
  *
@@ -291,40 +303,33 @@ int parse_dns_name(const u_char *packet,
  * @param bytes_received  Total length of buffer[].
  */
  void handle_packet(const u_char *buffer, int bytes_received) {
-     pthread_t tid = pthread_self();
+    // 2) Ethernet header
+    struct ethhdr *eth = (struct ethhdr *)buffer;
+    u_short eth_proto = ntohs(eth->h_proto);
+    const u_char *dns;
+    int dns_len;
+    pthread_t tid = pthread_self();
+
      // 1) Need at least Ethernet + minimal IPv4
-     if (bytes_received < (int)(sizeof(struct ethhdr) + sizeof(struct iphdr))) {
+     if (bytes_received < (int)(sizeof(struct ethhdr) + sizeof(struct iphdr)))
          return;
-     }
-
-     // 2) Ethernet header
-     struct ethhdr *eth = (struct ethhdr *)buffer;
-     u_short eth_proto = ntohs(eth->h_proto);
-
-     const u_char *dns;
-     int dns_len;
-
-     // --- IPv6 support (minimal change) ---
+     // IPv6 support
      if (eth_proto == ETH_P_IPV6) {
          // 2a) IPv6 header
-         if (bytes_received < (int)(sizeof(struct ethhdr) + sizeof(struct ip6_hdr))) {
+         if (bytes_received < (int)(sizeof(struct ethhdr) + sizeof(struct ip6_hdr)))
              return;
-         }
 
          struct ip6_hdr *ip6 = (struct ip6_hdr *)(buffer + sizeof(*eth));
-
          const u_char *l4 = buffer + sizeof(*eth) + sizeof(*ip6);
          int l4_len = bytes_received - sizeof(*eth) - sizeof(*ip6);
 
          if (ip6->ip6_nxt == IPPROTO_UDP) {
              // UDP over IPv6
              if (l4_len < (int)sizeof(struct udphdr)) return;
-             struct udphdr *udp = (struct udphdr *)l4;
 
+             struct udphdr *udp = (struct udphdr *)l4;
              // port 53 check
-             if (ntohs(udp->source) != DNS_PORT && ntohs(udp->dest) != DNS_PORT) {
-                 return;
-             }
+             if (ntohs(udp->source) != DNS_PORT && ntohs(udp->dest) != DNS_PORT) return;
 
              dns      = l4 + sizeof(*udp);
              dns_len  = l4_len - sizeof(*udp);
@@ -337,29 +342,22 @@ int parse_dns_name(const u_char *packet,
              if (l4_len < tcp_hdr_len + 2) return;  // need 2-byte length prefix
 
              // port 53 check
-             if (ntohs(tcp->source) != DNS_PORT && ntohs(tcp->dest) != DNS_PORT) {
-                 return;
-             }
+             if (ntohs(tcp->source) != DNS_PORT && ntohs(tcp->dest) != DNS_PORT) return;
 
              // skip 2-byte length field in TCP-based DNS
              dns      = l4 + tcp_hdr_len + 2;
              dns_len  = l4_len - tcp_hdr_len - 2;
 
-         } else {
-             return;
-         }
+         } else return;
 
          // 6) Need at least DNS header
          if (dns_len < 12) return;
-
          // 7) DNS header checks
          //    QR-flag = 1 → response
          if ((dns[2] & 0x80) == 0) return;
-
          //    Answer count > 0
          uint16_t ancount = ntohs(*(uint16_t *)(dns + 6));
          if (ancount == 0) return;
-
          // 8) Parse the question name at offset 12
          char domain[256];
          int consumed = parse_dns_name(buffer,
@@ -367,33 +365,23 @@ int parse_dns_name(const u_char *packet,
                                        domain,
                                        bytes_received,
                                        sizeof(domain));
-         if (consumed < 0) {
-             // parse error
-             return;
-         }
 
-         printf("DNN DAN | IPV6\n");
+         if (consumed < 0) return; // parse error
          // 9) Print result
          printf("IPV6 | thread ID = %lu, Domain: %s\n", (unsigned long)tid, domain);
          return;
-     }
-     // --- end IPv6 support ---
+     } // end IPv6
+
      // TODO ==> Wy this condition? why here and not first?
      // 2) skip non-IPv4
-     if (eth_proto != ETH_P_IP) {
-         // skip non-IPv4 frames
-         return;
-     }
+     if (eth_proto != ETH_P_IP) return; // skip non-IPv4 frames
 
      // 3) IPv4 header
      struct iphdr *ip = (struct iphdr *)(buffer + sizeof(*eth));
-     if (ip->version != 4) {
-         return;
-     }
+     if (ip->version != 4) return;
+
      int ip_hdr_len = ip->ihl * 4;
-     if (bytes_received < (int)(sizeof(*eth) + ip_hdr_len)) {
-         return;
-     }
+     if (bytes_received < (int)(sizeof(*eth) + ip_hdr_len)) return;
 
      // 4) Must be UDP or TCP
      const u_char *l4 = buffer + sizeof(*eth) + ip_hdr_len;
@@ -428,10 +416,7 @@ int parse_dns_name(const u_char *packet,
          dns      = l4 + tcp_hdr_len + 2;
          dns_len  = l4_len - tcp_hdr_len - 2;
          printf("DAN DAN | ipv4\n");
-     } else {
-         return;
-     }
-
+     } else return;
      // 6) Need at least DNS header
      if (dns_len < 12) return;
 
@@ -450,11 +435,7 @@ int parse_dns_name(const u_char *packet,
                                    domain,
                                    bytes_received,
                                    sizeof(domain));
-     if (consumed < 0) {
-         // parse error
-         return;
-     }
-
+     if (consumed < 0) return; // parse error
      // 9) Print result
      printf("IPV4 | thread ID = %lu, Domain: %s\n", (unsigned long)tid, domain);
  }
@@ -494,88 +475,8 @@ int main(void) {
                    &buf_sz, sizeof(buf_sz));
     }
 
-    // // full DNS‐only filter for IPv4 & IPv6 and DNS
-    // struct sock_filter code[] = {
-    //     /* 0: load EtherType */
-    //     BPF_STMT(BPF_LD   | BPF_H   | BPF_ABS, 12),
-
-    //     /* 1–2: if ETH_P_IP, jump to instr #4; else fall through */
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, ETH_P_IP,   0, 4),
-    //     /* 3: if ETH_P_IPV6, jump to instr #7; else drop */
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, ETH_P_IPV6, 0, 7),
-    //     /* 4: drop everything else */
-    //     BPF_STMT(BPF_RET  | BPF_K,     0),
-
-    //     /* ---- IPv4 path (instr #5 on) ---- */
-    //     /* 5: load IP protocol (offset 14+9 = 23) */
-    //     BPF_STMT(BPF_LD   | BPF_B   | BPF_ABS, 14+9),
-    //     /* 6: if UDP, jump to #10; if TCP, jump to #8; else drop */
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, IPPROTO_UDP, 0, 4),
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, IPPROTO_TCP, 0, 2),
-    //     BPF_STMT(BPF_RET  | BPF_K,     0),
-
-    //     /* ---- TCP over IPv4: instr #8 on ---- */
-    //     /* 8: load TCP data offset: src port at 14+20 = 34 */
-    //     BPF_STMT(BPF_LD   | BPF_H   | BPF_ABS, 14+20),
-    //     /* 9: if port==53 jump to #12; else check dst port at 14+22 */
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, DNS_PORT_BE, 2, 0),
-    //     BPF_STMT(BPF_LD   | BPF_H   | BPF_ABS, 14+22),
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, DNS_PORT_BE, 1, 0),
-    //     BPF_STMT(BPF_RET  | BPF_K,     0),
-    //     /* accept */
-    //     BPF_STMT(BPF_RET  | BPF_K,     (u_int)-1),
-
-    //     /* ---- UDP over IPv4: instr #12 on ---- */
-    //     /* 12: load UDP src port at 14+20 = 34 */
-    //     BPF_STMT(BPF_LD   | BPF_H   | BPF_ABS, 14+20),
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, DNS_PORT_BE, 2, 0),
-    //     /* 14: load UDP dst port at 14+22 = 36 */
-    //     BPF_STMT(BPF_LD   | BPF_H   | BPF_ABS, 14+22),
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, DNS_PORT_BE, 1, 0),
-    //     BPF_STMT(BPF_RET  | BPF_K,     0),
-    //     /* accept */
-    //     BPF_STMT(BPF_RET  | BPF_K,     (u_int)-1),
-
-    //     /* ---- IPv6 path (instr #17 on) ---- */
-    //     /* 17: load Next Header of IPv6 at offset 14+6 = 20 */
-    //     BPF_STMT(BPF_LD   | BPF_B   | BPF_ABS, 14+6),
-    //     /* 18: if UDP, jump to #22; if TCP, jump to #20; else drop */
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, IPPROTO_UDP, 0, 4),
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, IPPROTO_TCP, 0, 2),
-    //     BPF_STMT(BPF_RET  | BPF_K,     0),
-
-    //     /* ---- TCP over IPv6: instr #20 on ---- */
-    //     /* 20: load TCP src port at 14+40+0 = 54 */
-    //     BPF_STMT(BPF_LD   | BPF_H   | BPF_ABS, 14+40+0),
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, DNS_PORT_BE, 2, 0),
-    //     /* 22: load TCP dst port at 14+40+2 = 56 */
-    //     BPF_STMT(BPF_LD   | BPF_H   | BPF_ABS, 14+40+2),
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, DNS_PORT_BE, 1, 0),
-    //     BPF_STMT(BPF_RET  | BPF_K,     0),
-    //     /* accept */
-    //     BPF_STMT(BPF_RET  | BPF_K,     (u_int)-1),
-
-    //     /* ---- UDP over IPv6: instr #25 on ---- */
-    //     /* 25: load UDP src port at 14+40+0 = 54 */
-    //     BPF_STMT(BPF_LD   | BPF_H   | BPF_ABS, 14+40+0),
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, DNS_PORT_BE, 2, 0),
-    //     /* 27: load UDP dst port at 14+40+2 = 56 */
-    //     BPF_STMT(BPF_LD   | BPF_H   | BPF_ABS, 14+40+2),
-    //     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, DNS_PORT_BE, 1, 0),
-    //     BPF_STMT(BPF_RET  | BPF_K,     0),
-    //     /* accept */
-    //     BPF_STMT(BPF_RET  | BPF_K,     (u_int)-1),
-    // };
-
-    // struct sock_fprog fp = {
-    //     .len    = (unsigned short)(sizeof(code)/sizeof(code[0])),
-    //     .filter = code,
-    // };
-
-    //     setsockopt(raw_sock, SOL_SOCKET, SO_ATTACH_FILTER,
-    //                &fp, sizeof(fp));
-        // 3) Attach the global DNS‐only BPF filter
-        attach_dns_bpf(raw_sock);
+    // 3) Attach the global DNS‐only BPF filter
+    attach_dns_bpf(raw_sock);
 
     // 4) Make socket non-blocking
     {
@@ -620,38 +521,35 @@ int main(void) {
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, raw_sock, &ev);
 
     // 8) I/O loop: batch recvfrom() + enqueue()
-    {
-        struct epoll_event events[MAX_EVENTS];
-        u_char stack_buf[BUFFER_SIZE];
+    struct epoll_event events[MAX_EVENTS];
+    u_char stack_buf[BUFFER_SIZE];
 
-        while (1) {
-            int n = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
+    while (1) {
+        int n = epoll_wait(epoll_fd, events, MAX_EVENTS, 1000);
 
-            if (n < 0 && errno != EINTR) {
-                perror("epoll_wait");
-                break;
-            }
-            for (int i = 0; i < n; i++) {
+        if (n < 0 && errno != EINTR) {
+            perror("epoll_wait");
+            break;
+        }
 
-                if (events[i].data.fd == raw_sock) {
-                    // read until EAGAIN to batch
-                    while (1) {
-
-                        int len = recvfrom(raw_sock,
-                                           stack_buf,
-                                           sizeof(stack_buf),
-                                           0, NULL, NULL);
-                        if (len < 0) {
-                            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                                break;
-                            perror("recvfrom");
+        for (int i = 0; i < n; i++) {
+            if (events[i].data.fd == raw_sock) {
+                // read until EAGAIN to batch
+                while (1) {
+                    int len = recvfrom(raw_sock,
+                                        stack_buf,
+                                        sizeof(stack_buf),
+                                        0, NULL, NULL);
+                    if (len < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
                             break;
-                        }
-                        packet_t pkt = { .len = len };
-                        memcpy(pkt.data, stack_buf, len);
-                        enqueue(&pkt);
-
+                        perror("recvfrom");
+                        break;
                     }
+                    packet_t pkt = { .len = len };
+                    memcpy(pkt.data, stack_buf, len);
+                    enqueue(&pkt);
+
                 }
             }
         }
