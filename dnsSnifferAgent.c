@@ -131,10 +131,11 @@ static struct sock_fprog dns_bpf_prog = {
 //    - Protected by rb_mutex
 //    - Single producer (I/O thread) + multiple consumers (worker threads)
 // --------------------------------------------------------------------------
-static packet_t      rb_queue[QUEUE_SIZE];
-static size_t        rb_head = 0;
-static size_t        rb_tail = 0;
-static pthread_mutex_t rb_mutex = PTHREAD_MUTEX_INITIALIZER;
+static packet_t         rb_queue[QUEUE_SIZE];
+static size_t           rb_head = 0;
+static size_t           rb_tail = 0;
+static pthread_mutex_t  rb_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_t               workers[WORKER_COUNT];
 
 // --------------------------------------------------------------------------
 // 2) Helper to attach that global filter to any socket
@@ -507,10 +508,8 @@ int main(void) {
     // }
 
     // 6) Spawn worker threads
-    for (int i = 0; i < WORKER_COUNT; i++) {
-        pthread_t tid;
-        pthread_create(&tid, NULL, worker_thread, NULL);
-    }
+    for (int i = 0; i < WORKER_COUNT; i++)
+        pthread_create(&workers[i], NULL, worker_thread, NULL);
 
     // 7) Set up epoll on raw_sock
     epoll_fd = epoll_create1(0);
@@ -556,5 +555,9 @@ int main(void) {
     }
 
     close(raw_sock);
+    // Join worker threads
+    for (int i = 0; i < WORKER_COUNT; i++) {
+        pthread_join(workers[i], NULL);
+    }
     return 0;
 }
